@@ -93,7 +93,39 @@ const detailLabels: Array<[RegExp, string]> = [
 
 export const normalizeTaxDetails = (rawTaxType: string, text = '') => {
     const rawValue = cleanValue(rawTaxType);
-    const searchArea = `${rawValue}\n${text}`;
+    const receiptEvidence = text
+        .split(/\r?\n/)
+        .map(line => cleanValue(line))
+        .filter(line => line && !/^vat\s+on\s+charges(?:\s*\([^)]*\))?$/i.test(line))
+        .join('\n');
+
+    if (/^cit\s*(?:&|and)\s*edt$/i.test(rawValue)) {
+        return { taxType: 'CIT & EDT', remarks: 'CIT & EDT' };
+    }
+    if (/^cit$/i.test(rawValue)) {
+        return { taxType: 'CIT', remarks: 'CIT' };
+    }
+    if (/^stamp\s+dut(?:y|ies)$/i.test(rawValue)) {
+        return { taxType: 'Stamp Duty', remarks: 'Stamp Duty' };
+    }
+
+    if (/\bwvat\s*wallet\b|\bwithholding\s+vat\b/i.test(receiptEvidence)) {
+        return { taxType: 'WVAT', remarks: 'WVAT' };
+    }
+    if (/\bwht\s*wallet\b/i.test(receiptEvidence)) {
+        return { taxType: 'WHT', remarks: 'WHT' };
+    }
+    if (/\bcit\s*wallet\b|\bcompan(?:y|ies)\s+income\s+tax\b/i.test(receiptEvidence)) {
+        return { taxType: 'CIT', remarks: 'CIT' };
+    }
+    if (/\bpayment\s+of\s+sd\b|\bstamp\s+dut(?:y|ies)\b/i.test(receiptEvidence)) {
+        return { taxType: 'Stamp Duty', remarks: 'Stamp Duty' };
+    }
+    if (/\bvat\s*wallet\b/i.test(receiptEvidence)) {
+        return { taxType: 'VAT', remarks: 'VAT' };
+    }
+
+    const searchArea = `${rawValue}\n${receiptEvidence}`;
 
     if (/\b(?:withholding\s+vat|wvat)\b/i.test(searchArea)) {
         return { taxType: 'WVAT', remarks: 'WVAT' };
@@ -114,6 +146,9 @@ export const normalizeTaxDetails = (rawTaxType: string, text = '') => {
     if (/\bstamp\s+dut(?:y|ies)\b/i.test(searchArea)) {
         return { taxType: 'Stamp Duty', remarks: 'Stamp Duty' };
     }
+    if (/\b(?:compan(?:y|ies)\s+income\s+tax|cit)\b/i.test(searchArea)) {
+        return { taxType: 'CIT', remarks: 'CIT' };
+    }
 
     return { taxType: rawValue, remarks: rawValue };
 };
@@ -133,7 +168,8 @@ export const assessReceiptReview = (receipt: ReviewableReceipt): ReceiptReviewAs
     if (receipt.paymentPeriod && receipt.paymentPeriodSource === 'payment-date') {
         reviewIssues.push('Payment period was inferred from the payment date');
     }
-    if (receipt.receiptNumber && receipt.identifierType !== 'Receipt Number') {
+    const identifiersNeedingReview: IdentifierType[] = ['Deposit Slip Number', 'Other'];
+    if (receipt.receiptNumber && identifiersNeedingReview.includes(receipt.identifierType)) {
         reviewIssues.push(`Using ${receipt.identifierType.toLowerCase()} because a receipt number was not identified`);
     }
     if (/^(?:tax|other|revenue payment|revenue receipt)$/i.test(cleanValue(receipt.taxType))) {

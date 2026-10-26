@@ -22,6 +22,30 @@ test('keeps WVAT separate from VAT and WHT', () => {
     );
 });
 
+test('uses NRS service descriptions instead of the generic VAT on charges column', () => {
+    const cases = [
+        ['CITWallet Credit', 'CIT'],
+        ['Payment of SD', 'Stamp Duty'],
+        ['VATWallet Credit', 'VAT'],
+        ['WHTWallet Credit', 'WHT'],
+        ['WVATWallet Credit', 'WVAT']
+    ];
+
+    for (const [serviceDescription, expectedTaxType] of cases) {
+        assert.equal(
+            normalizeTaxDetails('VAT', `VAT ON CHARGES (NGN)\n${serviceDescription}`).taxType,
+            expectedTaxType
+        );
+    }
+});
+
+test('preserves the combined CIT and EDT label from an explicit source classification', () => {
+    assert.deepEqual(
+        normalizeTaxDetails('CIT & EDT', 'VAT ON CHARGES (NGN)\nCITWallet Credit'),
+        { taxType: 'CIT & EDT', remarks: 'CIT & EDT' }
+    );
+});
+
 test('identifies an RRR used as the alternative receipt identifier', () => {
     assert.equal(
         detectIdentifierType('Remita Retrieval Reference (RRR): 1014-3223-3272', '1014-3223-3272'),
@@ -37,7 +61,7 @@ test('does not label a payment reference as a receipt number when the receipt fi
     );
 });
 
-test('flags inferred fields and alternative identifiers for review', () => {
+test('flags an inferred period but accepts an official RRR identifier', () => {
     const assessment = assessReceiptReview({
         paymentDate: '2026-02-18',
         paymentPeriod: 'Jan-26',
@@ -48,11 +72,24 @@ test('flags inferred fields and alternative identifiers for review', () => {
         amount: 7355.32
     });
 
-    assert.equal(assessment.confidence, 'medium');
-    assert.deepEqual(assessment.reviewIssues, [
-        'Payment period was inferred from the payment date',
-        'Using rrr because a receipt number was not identified'
-    ]);
+    assert.equal(assessment.confidence, 'high');
+    assert.deepEqual(assessment.reviewIssues, ['Payment period was inferred from the payment date']);
+});
+
+test('does not request review for a complete receipt using an official RRR', () => {
+    const assessment = assessReceiptReview({
+        paymentDate: '2026-10-20',
+        paymentPeriod: '2024',
+        paymentPeriodSource: 'receipt',
+        receiptNumber: '1615-2545-5541',
+        identifierType: 'RRR',
+        taxType: 'WHT',
+        amount: 86986
+    });
+
+    assert.equal(assessment.confidence, 'high');
+    assert.equal(assessment.confidenceScore, 100);
+    assert.deepEqual(assessment.reviewIssues, []);
 });
 
 test('deduplicates formatting variations of the same identifier', () => {

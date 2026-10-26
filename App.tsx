@@ -112,7 +112,7 @@ const nigerianStates = [
     'Zamfara'
 ];
 
-const commonTaxTypes = ['PAYE', 'WHT', 'VAT', 'WVAT', 'Development Levy', 'Stamp Duty'];
+const commonTaxTypes = ['PAYE', 'CIT', 'CIT & EDT', 'WHT', 'VAT', 'WVAT', 'Development Levy', 'Stamp Duty'];
 const identifierTypes: IdentifierType[] = [
     'Receipt Number',
     'PRN',
@@ -545,7 +545,20 @@ const extractTaxType = (text: string) => {
         'Purpose'
     ]);
 
-    const searchArea = `${labelled}\n${text}`;
+    const receiptLines = text
+        .split('\n')
+        .map(line => cleanValue(line))
+        .filter(line => line && !/^vat\s+on\s+charges(?:\s*\([^)]*\))?$/i.test(line));
+    const searchArea = `${labelled}\n${receiptLines.join('\n')}`;
+
+    // NRS/Remita receipts put the real tax in SERVICE DESCRIPTION while also
+    // printing a generic "VAT ON CHARGES" column on every receipt.
+    if (/\bwvat\s*wallet\b|\bwithholding\s+vat\b/i.test(searchArea)) return 'WVAT';
+    if (/\bwht\s*wallet\b/i.test(searchArea)) return 'WHT';
+    if (/\bcit\s*wallet\b|\bcompan(?:y|ies)\s+income\s+tax\b/i.test(searchArea)) return 'CIT';
+    if (/\bpayment\s+of\s+sd\b|\bstamp\s+dut(?:y|ies)\b/i.test(searchArea)) return 'Stamp Duty';
+    if (/\bvat\s*wallet\b/i.test(searchArea)) return 'VAT';
+
     if (/\b(?:withholding\s+vat|wvat)\b/i.test(searchArea)) return 'WVAT';
     if (/\b(?:pay[-\s]*as[-\s]*you[-\s]*earn|paye)\b/i.test(searchArea)) return 'PAYE';
     if (/\bdevelopment\s+levy\b/i.test(searchArea)) return 'Development Levy';
@@ -571,10 +584,13 @@ const normalizeTaxTypeForSource = (rawValue: string, sourceFile: string) => {
     const value = cleanValue(rawValue);
     const source = sourceFile.replace(/[_-]+/g, ' ');
 
+    if (/\bcit\s*(?:&|and)\s*edt\b/i.test(source)) return 'CIT & EDT';
+    if (/\b(?:stamp\s+dut(?:y|ies)|nrs\s+sd)\b/i.test(source)) return 'Stamp Duty';
     if (/\b(?:dev(?:elopment)?\s+levy)\b/i.test(source)) return 'Development Levy';
     if ((value === '' || /^vat$/i.test(value) || /^igr tax$/i.test(value)) && /\bpaye\b/i.test(source)) return 'PAYE';
-    if (!value && /\bwvat\b/i.test(source)) return 'WVAT';
-    if (!value && /\bwht\b/i.test(source)) return 'WHT';
+    if (/\bwvat\b/i.test(source)) return 'WVAT';
+    if (/\bwht\b/i.test(source)) return 'WHT';
+    if (/\bvat\b/i.test(source)) return 'VAT';
 
     return value;
 };
@@ -598,7 +614,7 @@ const normalizeState = (rawValue: string, fullText = '') => {
         return 'FCT';
     }
 
-    if (/\b(?:firs|federal\s+inland\s+revenue|federal\s+govt|federal government)\b/i.test(combined)) {
+    if (/\b(?:firs|nrs|federal\s+inland\s+revenue|nigeria\s+revenue\s+service|federal\s+govt|federal government)\b/i.test(combined)) {
         return 'Federal';
     }
 
