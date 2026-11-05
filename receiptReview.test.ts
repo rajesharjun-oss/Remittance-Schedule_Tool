@@ -76,6 +76,22 @@ test('flags an inferred period but accepts an official RRR identifier', () => {
     assert.deepEqual(assessment.reviewIssues, ['Payment period was inferred from the payment date']);
 });
 
+test('accepts a complete receipt when a clear payment period comes from the filename', () => {
+    const assessment = assessReceiptReview({
+        paymentDate: '2024-02-20',
+        paymentPeriod: 'Jan-24',
+        paymentPeriodSource: 'filename',
+        receiptNumber: '2440018977',
+        identifierType: 'Receipt Number',
+        taxType: 'WHT',
+        amount: 32530.54
+    });
+
+    assert.equal(assessment.confidence, 'high');
+    assert.equal(assessment.confidenceScore, 100);
+    assert.deepEqual(assessment.reviewIssues, []);
+});
+
 test('does not request review for a complete receipt using an official RRR', () => {
     const assessment = assessReceiptReview({
         paymentDate: '2026-10-20',

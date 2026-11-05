@@ -162,9 +162,6 @@ export const assessReceiptReview = (receipt: ReviewableReceipt): ReceiptReviewAs
     if (!receipt.receiptNumber) reviewIssues.push('Receipt or alternative identifier is missing');
     if (!(receipt.amount > 0)) reviewIssues.push('Amount is missing or invalid');
 
-    if (receipt.paymentPeriod && receipt.paymentPeriodSource === 'filename') {
-        reviewIssues.push('Payment period was inferred from the filename');
-    }
     if (receipt.paymentPeriod && receipt.paymentPeriodSource === 'payment-date') {
         reviewIssues.push('Payment period was inferred from the payment date');
     }

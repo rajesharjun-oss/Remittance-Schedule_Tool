@@ -1003,7 +1003,6 @@ const App: React.FC = () => {
                 const text = await extractTextFromFile(file, setProgressText);
                 const parsed = parseReceiptText(text, file.name);
                 const parsedRows = parsed.rows;
-                duplicatesExcluded += parsed.duplicateCount;
                 let addedCount = 0;
                 let reviewCount = 0;
 
