@@ -37,7 +37,7 @@ test('recognizes the paid Plateau layout and preserves a labelled billing refere
     const [row] = parseReceiptText(`PLATEAU STATE INTERNAL REVENUE SERVICE
 Revenue receipt
 Payer Name: SAMPLE BANK LIMITED
-Description: PAYE REM. MAY 2026
+Description: PAYE REM. MAY. 2026
 Period 2026-05-01 - 2026-05-31
 Billing Ref: 9012345600
 Amount NGN 72,320.67

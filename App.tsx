@@ -243,7 +243,7 @@ const normalizePeriod = (rawValue: string, fallbackDate = '') => {
     }
 
     const monthYear = value.match(
-        /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\w*[-\s,/]*(\d{2,4})\b/i
+        /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\w*[-\s,/.]*(\d{2,4})\b/i
     );
     if (monthYear) {
         const monthIndex = monthLookup[monthYear[1].toLowerCase()];
@@ -923,19 +923,27 @@ const renderPageToCanvas = async (page: any, scaleLimit = 2, maxDimension = 3200
     return canvas;
 };
 
+let barcodeReader: Promise<typeof import('zxing-wasm/reader').readBarcodes> | undefined;
+
 const deltaReceiptQrText = async (canvas: HTMLCanvasElement) => {
     const context = canvas.getContext('2d');
     if (!context) return '';
     try {
-        const [{ prepareZXingModule, readBarcodes }, { default: wasmUrl }] = await Promise.all([
+        barcodeReader ??= Promise.all([
             import('zxing-wasm/reader'),
             import('zxing-wasm/reader/zxing_reader.wasm?url')
-        ]);
-        prepareZXingModule({ overrides: { locateFile: () => wasmUrl } });
+        ]).then(([reader, { default: wasmUrl }]) => {
+            reader.prepareZXingModule({ overrides: { locateFile: () => wasmUrl } });
+            return reader.readBarcodes;
+        });
+        const readBarcodes = await barcodeReader;
         const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-        const codes = await readBarcodes(pixels, { formats: ['QRCode'], tryHarder: true, maxNumberOfSymbols: 4 });
-        const receipts = new Set(codes.map(code => decodeDeltaReceiptPayload(code.text)).filter(Boolean));
-        return receipts.size === 1 ? [...receipts][0] : '';
+        for (const binarizer of ['LocalAverage', 'GlobalHistogram', 'FixedThreshold'] as const) {
+            const codes = await readBarcodes(pixels, { binarizer, formats: ['QRCode'], tryHarder: true, maxNumberOfSymbols: 4 });
+            const receipts = new Set(codes.map(code => decodeDeltaReceiptPayload(code.text)).filter(Boolean));
+            if (receipts.size) return receipts.size === 1 ? [...receipts][0] : '';
+        }
+        return '';
     } catch {
         return ''; // Printed or OCR fields can still be reviewed if barcode recovery is unavailable.
     }
@@ -960,9 +968,10 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
             const format = extractReceiptFormat(pageText);
             const deltaHint = /\bdelta\b|deltabir|treasury\s+book/i.test(file.name + '\n' + pageText);
             const recoverDelta = deltaHint && (!format?.receiptNumber || !format.paymentDate || !format.amount);
+            const retryPlateau = format?.state === 'Plateau' && !format.amount;
             const hasReceiptDetails = pageText.length > 40 && (scoreReceiptOcrText(pageText) >= 42 ||
                 Boolean(format?.receiptNumber && format.amount && format.paymentDate));
-            if ((hasReceiptDetails && !recoverDelta) || isSupportingDocument(pageText)) {
+            if ((hasReceiptDetails && !recoverDelta && !retryPlateau) || isSupportingDocument(pageText)) {
                 pageTexts.push(pageText);
                 continue;
             }
@@ -973,13 +982,24 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
                 const ocrText = await recognizePdfPage(canvas, ocrSession, `${file.name} page ${pageNumber}`);
                 if (scoreReceiptOcrText(ocrText) > scoreReceiptOcrText(pageText) || pageText.length <= 40) pageText = ocrText;
             }
-            if (!isSupportingDocument(pageText) && (!hasReceiptDetails || recoverDelta)) {
-                const qrCanvas = Math.max(canvas.width, canvas.height) < 3200
-                    ? await renderPageToCanvas(page, 5, 3450)
-                    : canvas;
-                const qr = await deltaReceiptQrText(qrCanvas);
-                if (qr && extractReceiptCandidatesWithSummary(pageText).candidates.length <= 1) {
-                    pageText = `${pageText}\n${qr}`;
+            const pageFormat = extractReceiptFormat(pageText);
+            const needsPlateauAmount = pageFormat?.state === 'Plateau' && !pageFormat.amount;
+            const needsDeltaQr = recoverDelta || (!hasReceiptDetails && !pageFormat) ||
+                (pageFormat?.state === 'Delta' && (!pageFormat.receiptNumber || !pageFormat.paymentDate || !pageFormat.amount));
+            if (!isSupportingDocument(pageText) && (needsPlateauAmount || needsDeltaQr) &&
+                extractReceiptCandidatesWithSummary(pageText).candidates.length <= 1) {
+                const detailedCanvas = Math.max(canvas.width, canvas.height) < 3200 ? await renderPageToCanvas(page, 5, 3450) : canvas;
+                if (needsPlateauAmount) {
+                    ocrSession ??= await createOcrSession(onProgress);
+                    const detailed = await ocrSession.recognize(detailedCanvas, `${file.name} page ${pageNumber} (checking Plateau amount)`);
+                    const candidate = extractReceiptFormat(detailed);
+                    if (candidate?.state === 'Plateau' && candidate.amount &&
+                        (!candidate.receiptNumber || !pageFormat.receiptNumber || candidate.receiptNumber === pageFormat.receiptNumber)) {
+                        pageText += `\nAmount Paid: NGN ${candidate.amount.toFixed(2)}`;
+                    }
+                } else {
+                    const qr = await deltaReceiptQrText(detailedCanvas);
+                    if (qr) pageText = `${pageText}\n${qr}`;
                 }
             }
             pageTexts.push(pageText);
