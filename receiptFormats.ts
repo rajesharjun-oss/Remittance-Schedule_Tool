@@ -1,7 +1,7 @@
 import type { IdentifierType } from './receiptReview.ts';
 
 const authorityHeading = String.raw`(?:REVENUE[ -]+(?:COLLECTOR['’]S[ -]+)?RECEIPT|(?:TREASURY|PERSONAL[ -]+INCOME[ -]+TAX|TAX|OFFICIAL)[ -]+RECEIPT)`;
-export const stateReceiptHeading = new RegExp(String.raw`^(?:[ \t]*(?:OYO|ONDO|DELTA|YOBE)[ _-]+STATE[^\n]{0,75}\n)?[ \t]*(?:E[- ]?)?${authorityHeading}(?:[ \t].*)?$`, 'gim');
+export const stateReceiptHeading = new RegExp(String.raw`^(?:[ \t]*(?:OYO|ONDO|DELTA|YOBE|ENUGU)[ _-]+STATE[^\n]{0,75}\n(?:[ \t]*INTERNAL[ \t]+REVENUE[ \t]+SERVICE[ \t]*\n)?)?[ \t]*(?:E[- ]?)?${authorityHeading}(?:[ \t].*)?$`, 'gim');
 const receiptEvidence = new RegExp(String.raw`\b(?:${authorityHeading}|PAYMENT[ \t]+RECEIPT|RECEIPT[ \t]*(?:NUMBER|NO\.?|ID)\s*[:#=])`, 'i');
 const unpaidStatus = /(?:^|\n)[ \t]*(?:payment[ \t]+)?status[ \t]*[:=-]?[ \t]*(?:unpaid|pending|failed|declined|not[ \t]+paid)\b/i;
 const supportHeading = /^[ \t]*(?:(?:remita |tax |payment )?invoice|assessment notice|(?:bank |cash )?deposit slip|bank teller(?: slip)?|payment (?:advice|instruction|request|acknowledgement)|remita payment request|tax bill|debit advice)[ \t]*$/im;
@@ -26,7 +26,8 @@ const field = (text: string, label: string, value: string) =>
     text.match(new RegExp(String.raw`\b(?:${label})(?![A-Z])(?:[ \t]*[:;#=.-])?[ \t]*(?:\n[ \t]*)?(${value})`, 'i'))?.[1]?.trim() || '';
 
 const numericAmount = (value: string) => Number(value.replace(/,\s*(\d{2})$/, '.$1').replace(/[ ,\t]/g, '')) || undefined;
-const labelledAmount = (text: string, labels: string) => numericAmount(field(text, labels, String.raw`(?:${currency})?${money}`).replace(new RegExp('^' + currency, 'i'), ''));
+const labelledAmount = (text: string, labels: string, currencyPattern = currency) =>
+    numericAmount(field(text, labels, String.raw`(?:${currencyPattern})?${money}`).replace(new RegExp('^(?:' + currencyPattern + ')', 'i'), ''));
 const identifier = (value: string) => value.replace(/[ \t]/g, '').toUpperCase();
 const namedRef = (text: string, pattern: RegExp) => identifier(text.match(pattern)?.[0] ?? '');
 
@@ -54,14 +55,75 @@ interface ReceiptFormat {
     remarks?: string;
     amount?: number;
     taxConflict?: boolean;
+    paymentDateConflict?: boolean;
     dateFromIssue?: boolean;
     qrConflict?: boolean;
 }
 
 const treasuryDate = (text: string, issueDateFromReference = '') => {
     const paid = field(text, paymentDateLabel, date);
-    const issued = field(text, 'dat(?:e|\\.)[ \t]+of[ \t]+(?:issue|tssue)|issued[ \t]+on', date) || issueDateFromReference;
+    const issued = field(text, 'dat(?:e|\\.)[ \t]+of[ \t]*(?:issue|tssue)|issued[ \t]+on', date) || issueDateFromReference;
     return { paymentDate: paid || issued, dateFromIssue: !paid && Boolean(issued) };
+};
+
+const calendarDate = (year: string, month: string, day: string) => {
+    const value = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+    return value.getUTCFullYear() === Number(year) && value.getUTCMonth() + 1 === Number(month) &&
+        value.getUTCDate() === Number(day) ? value.toISOString().slice(0, 10) : '';
+};
+
+const enuguBankDate = /\bESTAX[ \t]*[|Il!][ \t]*(\d{1,2})-(\d{1,2})-(20\d{2})(?=\s|[|Il!1]|$)/i;
+const enuguPayerLabel = "taxpayer(?:['’]s)?[ \t]+name";
+const enuguDate = (text: string, documentDate: string) => {
+    // The labelled payment date is month-first. The processor reference is day-first.
+    const monthFirst = documentDate.match(/^(\d{1,2})\/(\d{1,2})\/(20\d{2})$/);
+    const bank = text.match(enuguBankDate);
+    const onReceipt = monthFirst ? calendarDate(monthFirst[3], monthFirst[1], monthFirst[2]) : documentDate;
+    const fromBank = bank ? calendarDate(bank[3], bank[2], bank[1]) : '';
+    return {
+        paymentDate: onReceipt || fromBank,
+        paymentDateConflict: Boolean(monthFirst && onReceipt && fromBank && onReceipt !== fromBank)
+    };
+};
+
+const bauchiSerialPattern = /\bBASG[ \t-]*\d(?:[ \t]*\d){5}(?![ \t]*\d)/i;
+export const extractBauchiTreasurySerial = (text: string) =>
+    namedRef(text, bauchiSerialPattern).replace(/-/g, '');
+
+const bauchiFooter = /\bRevenue[ \t]+Item[ \t]+Amount\b[^\n]*(?:\n[^\n]*){0,5}/i;
+export const hasBauchiTreasuryLayout = (text: string) =>
+    /\bPERSONAL[ \t]+INCOME[ \t]+TAX[ \t]+YEAR\b/i.test(text.slice(0, 900)) &&
+    /\bAGENCY[ \t]+REVENUE[ \t]+ITEM[ \t]+AMOUNT\b/i.test(text);
+
+export const isBauchiTreasuryReceipt = (text: string) => {
+    const header = text.slice(0, 900);
+    const bauchiHeading = /\bBA(?:U?[ \t]*C?[ \t]*H[ \t]*I|I[ \t]*HI)[ \t_-]+STATE[ \t]+GOV/i.test(header);
+    const treasuryForm = /\bTREASURY\b/i.test(text) &&
+        /\b(?:revenue[ \t]+division[ \t]+centre|personal[ \t]+income[ \t]+tax|date[ \t]+of[ \t]*issue)\b/i.test(text);
+    return (treasuryForm || hasBauchiTreasuryLayout(text)) && (bauchiHeading || bauchiSerialPattern.test(header));
+};
+
+const treasuryFooterAmount = new RegExp(String.raw`^[ \t]*(?:${currency})?(${money})[ \t]*$`, 'i');
+export const extractTreasuryPrintedAmount = (line: string) => {
+    const raw = line.trim().match(treasuryFooterAmount)?.[1];
+    return raw && /[.,]\s*\d{2}$/.test(raw) ? numericAmount(raw) : undefined;
+};
+
+const bauchiTreasuryDetails = (text: string) => {
+    const footer = text.match(bauchiFooter)?.[0] ?? '';
+    const values = new Set<number>();
+    for (const line of footer.split('\n')) {
+        const tail = line.replace(/^.*\b(?:INTERNAL[ \t]+REVENUE|PAY[ \t]+AS[ \t]+YOU[ \t]+EARN|WHT)\)[ \t]*/i, '');
+        const amount = extractTreasuryPrintedAmount(tail);
+        if (amount) values.add(amount);
+    }
+    const paye = /PAY[ \t-]+AS[ \t-]+YOU[ \t-]+EARN|\bPAYE\b/i.test(footer || text);
+    const wht = /\bWITHHOLDING[ \t]+TAX\b|\bWHT(?:\b|ON\b)/i.test(footer || text);
+    return {
+        amount: values.size === 1 ? [...values][0] : undefined,
+        taxType: paye === wht ? '' : paye ? 'PAYE' : 'WHT',
+        taxConflict: paye && wht
+    };
 };
 
 const deltaQrPattern = /^(?:Assessment Ref:[ \t]*N\/A[ \t]+)?Payment Ref:[ \t]*DTS\/[A-Z0-9]+\/[A-Z0-9]+\/(\d{2})(\d{2,4})\/[A-Z0-9/]+[ \t]+Receipt Number:[ \t]*(\d{19,32})[ \t]+Customer Name:[ \t]*([^\n\r]{1,160}?)[ \t]+Payment Amount:[ \t]*(\d{1,11}\.\d{2})(?:[ \t]*TransactionReference:[ \t]*\d+)?$/i;
@@ -105,6 +167,26 @@ export const extractReceiptFormat = (text: string): ReceiptFormat | undefined =>
     const period = (value: string) => value.match(explicitPeriod)?.[1];
     const paymentPeriod = [...text.matchAll(periodLabel)].map(match => period(match[1])).find(Boolean) || period(payer);
 
+    if ((/\bENUGU[ _-]+STATE\b/i.test(header) && receipt) ||
+        (enuguBankDate.test(text) && /\bAmount[ \t]+Paid\b/i.test(text))) {
+        const reference = identifier(field(text, printedIdLabel, '\\d(?:[ \\t]*\\d){9}(?![ \\t]*\\d)'));
+        const recipient = field(text, enuguPayerLabel, '[^\\n]{2,130}').split(/\bReceipt[ \t]+(?:No\.?|Number)\b/i)[0].trim();
+        const otherDetails = field(text, 'other[ \t]+details', '[^\\n]{2,100}');
+        return {
+            state: 'Enugu', receiptNumber: reference, identifierType: reference ? 'Receipt Number' : 'Missing',
+            companyName: recipient || payer, paymentPeriod: period(otherDetails) || period(recipient) || paymentPeriod,
+            amount: labelledAmount(text, paidAmountLabel, String.raw`${currency}|¥[ \t]*`),
+            ...enuguDate(text, documentDate)
+        };
+    }
+    if (isBauchiTreasuryReceipt(text)) {
+        const reference = extractBauchiTreasurySerial(text);
+        const details = bauchiTreasuryDetails(text);
+        return {
+            state: 'Bauchi', receiptNumber: reference, identifierType: reference ? 'Receipt Number' : 'Missing',
+            companyName: payer, paymentPeriod, ...details, amount: amountPaid ?? details.amount, ...treasuryDate(text)
+        };
+    }
     if (/\bANAMBRA[ _-]+STATE[ _-]+(?:IGR|INTERNAL[ \t]+REVENUE)\b/i.test(header) && receipt) {
         return { state: 'Anambra', receiptNumber: printedNumber || undefined, identifierType: printedNumber ? 'Receipt Number' : undefined,
             companyName: payer, paymentDate: documentDate, amount: amountPaid, paymentPeriod };

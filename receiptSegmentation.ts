@@ -1,4 +1,4 @@
-import { isSupportingDocument, stateReceiptHeading } from './receiptFormats.ts';
+import { isBauchiTreasuryReceipt, isSupportingDocument, stateReceiptHeading } from './receiptFormats.ts';
 
 export interface ReceiptCandidate {
     text: string;
@@ -73,7 +73,7 @@ const isReceiptStartChunk = (text: string) => {
 
     const hasAuthorityHeading = text.search(stateReceiptHeading) >= 0;
     return hasLagosTopReference || hasRemitaReference || hasStrongReceiptDetails || hasReceiptNumberLabel || hasReceiptHeading ||
-        hasAuthorityHeading || /^Delta QR reference:/im.test(text) || isSupportingDocument(text);
+        hasAuthorityHeading || /^Delta QR reference:/im.test(text) || isBauchiTreasuryReceipt(text) || isSupportingDocument(text);
 };
 
 const groupContinuationChunks = (chunks: string[]) => {

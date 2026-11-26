@@ -27,6 +27,8 @@ The reconciliation summary shows uploaded files, unique receipts, review status,
 
 The scanner recognizes official receipt numbers and labelled alternatives on newer state formats, including Yobe revenue receipts, Plateau billing references and state treasury receipts. Delta QR payloads with receipt details can be read locally in the browser. The app does not open QR links or send receipt data to a verification site.
 
+Enugu revenue receipts use a month-first payment date and can include a separate print date. Bauchi paper treasury receipts use a printed BASG serial with an issue date that may require confirmation. For scanned PDFs, the scanner can retry OCR on Bauchi's printed serial and amount fields when the first pass misses them.
+
 ## Security Notes
 
 - No Gemini or other LLM API keys are required.

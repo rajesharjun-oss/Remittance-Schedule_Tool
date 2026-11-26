@@ -1,6 +1,14 @@
 import React, { useState } from 'react';
 import { extractReceiptCandidatesWithSummary } from './receiptSegmentation.ts';
-import { decodeDeltaReceiptPayload, extractReceiptFormat, getPaydirectPaymentReference, isSupportingDocument } from './receiptFormats.ts';
+import {
+    decodeDeltaReceiptPayload,
+    extractBauchiTreasurySerial,
+    extractReceiptFormat,
+    extractTreasuryPrintedAmount,
+    getPaydirectPaymentReference,
+    hasBauchiTreasuryLayout,
+    isSupportingDocument
+} from './receiptFormats.ts';
 import {
     assemblePdfText,
     extractFallbackAmount,
@@ -39,6 +47,7 @@ interface ScannerResult {
     reviewIssues: string[];
     reviewed: boolean;
     taxConflict?: boolean;
+    paymentDateConflict?: boolean;
     dateFromIssue?: boolean;
     qrConflict?: boolean;
 }
@@ -747,6 +756,7 @@ const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receip
         taxType,
         amount,
         taxConflict: raw.taxConflict,
+        paymentDateConflict: raw.paymentDateConflict,
         dateFromIssue: raw.dateFromIssue,
         qrConflict: raw.qrConflict
     });
@@ -766,6 +776,7 @@ const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receip
         state,
         sourceFile,
         taxConflict: raw.taxConflict,
+        paymentDateConflict: raw.paymentDateConflict,
         dateFromIssue: raw.dateFromIssue,
         qrConflict: raw.qrConflict,
         ...assessment,
@@ -810,13 +821,20 @@ export const parseReceiptText = (text: string, sourceFile: string) => {
     return { rows, duplicateCount, supportingCount: candidates.length - paymentCandidates.length };
 };
 
+interface OcrLineRegion {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+}
+
 interface OcrSession {
-    recognize: (imageLike: File | HTMLCanvasElement, label: string) => Promise<string>;
+    recognize: (imageLike: File | HTMLCanvasElement, label: string, lineRegion?: OcrLineRegion) => Promise<string>;
     terminate: () => Promise<unknown>;
 }
 
 const createOcrSession = async (onProgress: (message: string) => void): Promise<OcrSession> => {
-    const { createWorker } = await import('tesseract.js');
+    const { createWorker, PSM } = await import('tesseract.js');
     let activeLabel = 'OCR';
     const worker = await createWorker('eng', 1, {
         workerPath: `${ocrAssetBasePath}/worker.min.js`,
@@ -831,13 +849,49 @@ const createOcrSession = async (onProgress: (message: string) => void): Promise<
     } as any);
 
     return {
-        recognize: async (imageLike, label) => {
+        recognize: async (imageLike, label, lineRegion) => {
             activeLabel = label;
-            const result = await worker.recognize(imageLike as any);
+            const options = lineRegion ? { rectangle: lineRegion, tessedit_pageseg_mode: PSM.SINGLE_LINE } : undefined;
+            const result = await worker.recognize(imageLike, options);
             return result.data.text || '';
         },
         terminate: () => worker.terminate()
     };
+};
+
+const recognizePrintedLine = (
+    canvas: HTMLCanvasElement,
+    session: OcrSession,
+    label: string,
+    region: OcrLineRegion
+) => session.recognize(canvas, label, {
+    left: Math.floor(canvas.width * region.left),
+    top: Math.floor(canvas.height * region.top),
+    width: Math.floor(canvas.width * region.width),
+    height: Math.floor(canvas.height * region.height)
+});
+
+const recoverBauchiFields = async (canvas: HTMLCanvasElement, session: OcrSession, label: string, text: string) => {
+    let format = extractReceiptFormat(text);
+    if (!format?.receiptNumber) {
+        const line = await recognizePrintedLine(canvas, session, label + ' (checking Bauchi serial)', {
+            left: 0.73, top: 0.103, width: 0.26, height: 0.033
+        });
+        const serial = extractBauchiTreasurySerial(line);
+        if (serial) {
+            text = `No. ${serial}\n${text}`;
+            format = extractReceiptFormat(text);
+        }
+    }
+    if (format?.state === 'Bauchi' && format.receiptNumber && !format.amount) {
+        const line = await recognizePrintedLine(canvas, session, label + ' (checking Bauchi amount)', {
+            left: 0.62, top: 0.444, width: 0.11, height: 0.028
+        });
+        // The end of the adjacent revenue item may appear before the amount.
+        const amount = extractTreasuryPrintedAmount(line.trim().replace(/^[^\n)]{1,6}\)[ \t]*/, ''));
+        if (amount) text += `\nAmount Paid: NGN ${amount.toFixed(2)}`;
+    }
+    return text;
 };
 
 const recognizeText = async (
@@ -865,7 +919,8 @@ const scoreReceiptOcrText = (text: string) => {
         [/\bCustomer\s+Name\b|\bTaxpayer\s+Name\b|\bPayer\s+Name\b/i, 10]
     ];
 
-    return signals.reduce((score, [pattern, weight]) => score + (pattern.test(text) ? weight : 0), 0) +
+    return (hasBauchiTreasuryLayout(text) ? 80 : 0) +
+        signals.reduce((score, [pattern, weight]) => score + (pattern.test(text) ? weight : 0), 0) +
         Math.min(text.replace(/\s/g, '').length / 100, 10);
 };
 
@@ -898,6 +953,8 @@ const recognizePdfPage = async (
 
     for (const attempt of attempts) {
         const text = await session.recognize(attempt.getCanvas(), attempt.label);
+        const format = extractReceiptFormat(text);
+        if (format?.state === 'Enugu' && format.receiptNumber && format.paymentDate && format.amount) return text;
         const score = scoreReceiptOcrText(text);
         if (score > bestScore) {
             bestText = text;
@@ -969,9 +1026,11 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
             const deltaHint = /\bdelta\b|deltabir|treasury\s+book/i.test(file.name + '\n' + pageText);
             const recoverDelta = deltaHint && (!format?.receiptNumber || !format.paymentDate || !format.amount);
             const retryPlateau = format?.state === 'Plateau' && !format.amount;
+            const retryBauchi = (format?.state === 'Bauchi' || hasBauchiTreasuryLayout(pageText)) &&
+                (!format?.receiptNumber || !format?.amount);
             const hasReceiptDetails = pageText.length > 40 && (scoreReceiptOcrText(pageText) >= 42 ||
                 Boolean(format?.receiptNumber && format.amount && format.paymentDate));
-            if ((hasReceiptDetails && !recoverDelta && !retryPlateau) || isSupportingDocument(pageText)) {
+            if ((hasReceiptDetails && !recoverDelta && !retryPlateau && !retryBauchi) || isSupportingDocument(pageText)) {
                 pageTexts.push(pageText);
                 continue;
             }
@@ -984,9 +1043,11 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
             }
             const pageFormat = extractReceiptFormat(pageText);
             const needsPlateauAmount = pageFormat?.state === 'Plateau' && !pageFormat.amount;
+            const needsBauchiFields = (pageFormat?.state === 'Bauchi' || hasBauchiTreasuryLayout(pageText)) &&
+                (!pageFormat?.receiptNumber || !pageFormat?.amount);
             const needsDeltaQr = recoverDelta || (!hasReceiptDetails && !pageFormat) ||
                 (pageFormat?.state === 'Delta' && (!pageFormat.receiptNumber || !pageFormat.paymentDate || !pageFormat.amount));
-            if (!isSupportingDocument(pageText) && (needsPlateauAmount || needsDeltaQr) &&
+            if (!isSupportingDocument(pageText) && (needsPlateauAmount || needsBauchiFields || needsDeltaQr) &&
                 extractReceiptCandidatesWithSummary(pageText).candidates.length <= 1) {
                 const detailedCanvas = Math.max(canvas.width, canvas.height) < 3200 ? await renderPageToCanvas(page, 5, 3450) : canvas;
                 if (needsPlateauAmount) {
@@ -997,6 +1058,9 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
                         (!candidate.receiptNumber || !pageFormat.receiptNumber || candidate.receiptNumber === pageFormat.receiptNumber)) {
                         pageText += `\nAmount Paid: NGN ${candidate.amount.toFixed(2)}`;
                     }
+                } else if (needsBauchiFields) {
+                    ocrSession ??= await createOcrSession(onProgress);
+                    pageText = await recoverBauchiFields(detailedCanvas, ocrSession, `${file.name} page ${pageNumber}`, pageText);
                 } else {
                     const qr = await deltaReceiptQrText(detailedCanvas);
                     if (qr) pageText = `${pageText}\n${qr}`;
@@ -1149,6 +1213,7 @@ const App: React.FC = () => {
             if (field === 'paymentDate') {
                 updated.paymentDateDisplay = formatDateDisplay(value);
                 updated.dateFromIssue = false;
+                updated.paymentDateConflict = false;
             }
             if (field === 'taxType') updated.taxConflict = false;
             if (field === 'paymentPeriod') updated.paymentPeriodSource = value ? 'receipt' : 'missing';

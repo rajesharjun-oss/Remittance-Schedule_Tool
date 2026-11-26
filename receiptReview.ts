@@ -23,6 +23,7 @@ export interface ReviewableReceipt {
     taxType: string;
     amount: number;
     taxConflict?: boolean;
+    paymentDateConflict?: boolean;
     dateFromIssue?: boolean;
     qrConflict?: boolean;
 }
@@ -173,6 +174,7 @@ export const assessReceiptReview = (receipt: ReviewableReceipt): ReceiptReviewAs
         reviewIssues.push('Payment period was inferred from the payment date');
     }
     if (receipt.dateFromIssue) reviewIssues.push('The treasury receipt gives an issue date only. Confirm the payment date.');
+    if (receipt.paymentDateConflict) reviewIssues.push('The printed payment date and processor reference date disagree.');
     if (receipt.qrConflict) reviewIssues.push('The QR and printed fields disagree. Check the receipt number, amount and date.');
     const identifiersNeedingReview: IdentifierType[] = ['Deposit Slip Number', 'Other'];
     if (receipt.receiptNumber && identifiersNeedingReview.includes(receipt.identifierType)) {

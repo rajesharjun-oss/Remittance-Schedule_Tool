@@ -33,6 +33,83 @@ test('Anambra IGR captures the paid amount, official number and printed quarter'
     ]);
 });
 
+const enugu = `ENUGU STATE GOVERNMENT
+INTERNAL REVENUE SERVICE
+REVENUE RECEIPT
+Taxpayer's Name: EXAMPLE MFB PAYE REM. JAN 2026 Receipt No: 2600000123Taxpayer
+Payment Date: 02/16/2026 17:38:31
+BANK|BRH|ESTAX|16-02-2026|100001
+Revenue Name: Pay As You Earn (PAYE) - Companies
+Other Details: January 2026 | West Branch
+Amount Paid: N172,000.28
+Printed on 27/02/2026, 13:31:00`;
+
+test('Enugu keeps the official receipt number and month-first payment date', () => {
+    const [row] = parseReceiptText(enugu, 'sample.pdf').rows;
+    assert.deepEqual([row.state, row.receiptNumber, row.paymentDate, row.amount, row.paymentPeriod, row.taxType], [
+        'Enugu', '2600000123', '2026-02-16', 172000.28, 'Jan-26', 'PAYE'
+    ]);
+    assert.deepEqual(row.reviewIssues, []);
+
+    const [ambiguous] = parseReceiptText(enugu.replace('02/16/2026', '02/12/2026').replace('16-02-2026', '12-02-2026'), 'sample.pdf').rows;
+    assert.equal(ambiguous.paymentDate, '2026-02-12');
+    assert.deepEqual(ambiguous.reviewIssues, []);
+
+    const [ocrCurrency] = parseReceiptText(enugu.replace('N172,000.28', '¥12,982,000.04'), 'sample.pdf').rows;
+    assert.equal(ocrCurrency.amount, 12982000.04);
+});
+
+test('Enugu flags discordant dates and never substitutes the print date', () => {
+    const [conflict] = parseReceiptText(enugu.replace('16-02-2026', '17-02-2026'), 'sample.pdf').rows;
+    assert.equal(conflict.paymentDate, '2026-02-16');
+    assert.match(conflict.reviewIssues.join(' '), /processor reference date disagree/);
+
+    const [fallback] = parseReceiptText(enugu.replace('Payment Date: 02/16/2026 17:38:31', ''), 'sample.pdf').rows;
+    assert.equal(fallback.paymentDate, '2026-02-16');
+
+    const [missing] = parseReceiptText(enugu.replace(/Payment Date:.*\n|BANK\|BRH.*\n/g, ''), 'sample.pdf').rows;
+    assert.equal(missing.paymentDate, '');
+    assert.match(missing.reviewIssues.join(' '), /Payment date is missing/);
+});
+
+const bauchi = `BA HI STATE GOVE NMENT
+PERSONAL INCOME TAX YEAR
+RECEIPT
+No. BASG 3 9 0 1 2 3
+TREASURY
+Revenue Division Centre
+Date of Issue: 02/03/2026
+Revenue Item Amount
+BOARD OF INTERNAL REVENUEPAY AS YOU EARN (CURRENT) (BOARD OF INTERNAL REVENUE)
+282,000.55`;
+
+test('Bauchi reads the BASG serial and printed revenue item, with issue-date review', () => {
+    const [row] = parseReceiptText(bauchi, 'Sample Bank FEB 2026.pdf').rows;
+    assert.deepEqual([row.state, row.receiptNumber, row.paymentDate, row.amount, row.paymentPeriod, row.taxType], [
+        'Bauchi', 'BASG390123', '2026-03-02', 282000.55, 'Feb-26', 'PAYE'
+    ]);
+    assert.match(row.reviewIssues.join(' '), /issue date only/);
+});
+
+test('Bauchi keeps unreadable fields in review and ignores handwritten total fragments', () => {
+    const partial = bauchi.replace('BASG 3 9 0 1 2 3', 'B G 390123')
+        .replace('02/03/2026', 'illegible').replace('282,000.55', '9) 000.55')
+        .replace('TREASURY', 'Total 9\nTREASURY');
+    const [row] = parseReceiptText(partial, 'Sample Bank FEB 2026.pdf').rows;
+    assert.deepEqual([row.state, row.receiptNumber, row.paymentDate, row.amount], ['Bauchi', '', '', 0]);
+    assert.equal(hasMissingRequiredReceiptFields(row), true);
+});
+
+test('Bauchi identifies the paper template when OCR only recovers the serial from a close-up', () => {
+    const [row] = parseReceiptText(`No. BASG 390123
+GOVERNMENT
+PERSONAL INCOME TAX YEAR
+Agency Revenue Item Amount
+BOARD OF INTERNAL REVENUEPAY AS YOU EARN (CURRENT) (BOARD OF INTERNAL REVENUE)
+Amount Paid: NGN 282000.55`, 'Sample Bank FEB 2026.pdf').rows;
+    assert.deepEqual([row.state, row.receiptNumber, row.amount, row.taxType], ['Bauchi', 'BASG390123', 282000.55, 'PAYE']);
+});
+
 test('recognizes the paid Plateau layout and preserves a labelled billing reference', () => {
     const [row] = parseReceiptText(`PLATEAU STATE INTERNAL REVENUE SERVICE
 Revenue receipt
