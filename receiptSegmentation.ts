@@ -1,3 +1,5 @@
+import { isSupportingDocument, stateReceiptHeading } from './receiptFormats.ts';
+
 export interface ReceiptCandidate {
     text: string;
     identityKey: string;
@@ -10,6 +12,7 @@ export interface ReceiptCandidateSummary {
 
 const samePageReceiptStartPatterns = [
     /(?:FIRS\s+TAXPROMAX\s+)?PAYMENT\s+RECEIPT\b/gi,
+    stateReceiptHeading,
     /Payment\s+Reference\s+Number\s*(?:\(\s*PRN\s*\))?\s*[:#=-]?/gi,
     /REMITA\s+(?:PAYMENT\s+)?RECEIPT\b/gi,
     /REMITA\s+RETRIEVAL\s+REFERENCE\s*(?:\(\s*RRR\s*\))?\s*[:#=-]?/gi
@@ -68,7 +71,9 @@ const isReceiptStartChunk = (text: string) => {
     const hasReceiptNumberLabel = /\bReceipt\s*(?:No\.?|Number|#|ID)\b/i.test(text);
     const hasReceiptHeading = /\bPAYMENT\s+RECEIPT\b/i.test(text);
 
-    return hasLagosTopReference || hasRemitaReference || hasStrongReceiptDetails || hasReceiptNumberLabel || hasReceiptHeading;
+    const hasAuthorityHeading = text.search(stateReceiptHeading) >= 0;
+    return hasLagosTopReference || hasRemitaReference || hasStrongReceiptDetails || hasReceiptNumberLabel || hasReceiptHeading ||
+        hasAuthorityHeading || /^Delta QR reference:/im.test(text) || isSupportingDocument(text);
 };
 
 const groupContinuationChunks = (chunks: string[]) => {
@@ -94,7 +99,7 @@ const cleanIdentityValue = (value: string) =>
 
 export const extractReceiptIdentity = (text: string) => {
     const identityPatterns: Array<[string, RegExp]> = [
-        ['receipt', /Receipt\s*(?:No\.?|Number|#|ID)\s*[:#=-]?\s*([A-Z0-9][A-Z0-9|/_-]{5,})/i],
+        ['receipt', /Receipt\s*(?:No\.?|Number|#|ID)\s*[:;#=-]?\s*([A-Z0-9][A-Z0-9|/_-]{5,})/i],
         ['prn', /Payment\s+Reference\s+Number\s*\(\s*PRN\s*\)\s*[:#=-]?\s*([A-Z0-9][A-Z0-9|/_-]{5,})/i],
         ['payment-ref', /Payment\s+Ref(?:erence)?\.?\s+Number\s*[:#=-]?\s*([A-Z0-9][A-Z0-9|/_-]{5,})/i],
         ['rrr', /(?:Remita\s+Retrieval\s+Reference|RRR)\s*(?:Number|No\.?)?\s*[:#=-]?\s*([A-Z0-9][A-Z0-9|/_-]{5,})/i],
@@ -106,7 +111,7 @@ export const extractReceiptIdentity = (text: string) => {
         if (!match?.[1]) continue;
 
         const value = cleanIdentityValue(match[1]);
-        if (value.length >= 6) return `${kind}:${value}`;
+        if (value.length >= 6 && /\d/.test(value)) return `${kind}:${value}`;
     }
 
     return '';

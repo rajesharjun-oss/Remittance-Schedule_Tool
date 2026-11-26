@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { extractReceiptCandidatesWithSummary } from './receiptSegmentation.ts';
+import { decodeDeltaReceiptPayload, extractReceiptFormat, getPaydirectPaymentReference, isSupportingDocument } from './receiptFormats.ts';
 import {
     assemblePdfText,
     extractFallbackAmount,
@@ -10,6 +11,7 @@ import {
     assessReceiptReview,
     createReceiptDeduplicationKey,
     detectIdentifierType,
+    hasMissingRequiredReceiptFields,
     normalizeTaxDetails,
     type ConfidenceLevel,
     type IdentifierType,
@@ -36,6 +38,9 @@ interface ScannerResult {
     confidenceScore: number;
     reviewIssues: string[];
     reviewed: boolean;
+    taxConflict?: boolean;
+    dateFromIssue?: boolean;
+    qrConflict?: boolean;
 }
 
 const monthLookup: Record<string, number> = {
@@ -121,6 +126,7 @@ const identifierTypes: IdentifierType[] = [
     'Transaction Reference',
     'Deposit Slip Number',
     'CBS Reference',
+    'Billing Reference',
     'Session ID',
     'Other',
     'Missing'
@@ -227,6 +233,9 @@ const normalizePeriod = (rawValue: string, fallbackDate = '') => {
     const value = cleanValue(rawValue);
     if (!value) return derivePreviousPeriod(fallbackDate);
 
+    const quarter = value.match(/\b(Q[1-4])[-\s]+((?:19|20)\d{2})\b/i);
+    if (quarter) return quarter[1].toUpperCase() + ' ' + quarter[2];
+
     const dateLikePeriod = parseDateToIso(value);
     if (dateLikePeriod) {
         const [, year, month] = dateLikePeriod.match(/^(\d{4})-(\d{2})-\d{2}$/) ?? [];
@@ -260,7 +269,7 @@ const isNormalizedMonthPeriod = (value: string) => /^[A-Z][a-z]{2}-\d{2}$/.test(
 const normalizeSourceFilePeriod = (sourceFile: string, fallbackDate = '') => {
     const fileStem = sourceFile.replace(/\.[^.]+$/, '');
     const normalized = normalizePeriod(fileStem, fallbackDate);
-    if (isNormalizedMonthPeriod(normalized)) return normalized;
+    if (isNormalizedMonthPeriod(normalized) || /^Q[1-4] \d{4}$/.test(normalized)) return normalized;
 
     const monthOnly = fileStem.match(
         /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/i
@@ -403,6 +412,7 @@ const extractCompanyName = (text: string) => {
         'Customer Name',
         'Remitter Name',
         'Paid By',
+        'Received From',
         'Taxpayer'
     ]);
     if (labelled) return normalizeCompanyName(labelled);
@@ -443,7 +453,7 @@ const extractReceiptNumber = (text: string, stateHint = '') => {
     const remitaRrr = extractRemitaRrr(text);
     if (remitaRrr) return remitaRrr;
 
-    if (context.isPaydirectReceipt) return '';
+    if (context.isPaydirectReceipt) return getPaydirectPaymentReference(text);
 
     const stateSpecificPatterns: ReceiptPattern[] = [
         { regex: /(?:CBS\s*(?:Ref|Reference|No\.?|Number)?\s*[:#=-]*\s*)([A-Z0-9][A-Z0-9/_-]{5,30})/i },
@@ -698,8 +708,8 @@ const extractAmount = (text: string) => {
     return Math.max(...matches);
 };
 
-const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receiptText = ''): ScannerResult => {
-    const paymentDate = parseDateToIso(raw.paymentDate ?? '') || cleanValue(raw.paymentDate);
+const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receiptText = '', format?: ReturnType<typeof extractReceiptFormat>): ScannerResult => {
+    const paymentDate = parseDateToIso(raw.paymentDate ?? '') || (format ? '' : cleanValue(raw.paymentDate));
     const rawPaymentPeriod = cleanValue(raw.paymentPeriod);
     const sourceFilePeriod = normalizeSourceFilePeriod(sourceFile, paymentDate);
     let paymentPeriodSource: PeriodSource = 'missing';
@@ -722,10 +732,12 @@ const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receip
             : parseAmount(String(raw.amount ?? '')) ?? 0;
     const receiptNumber = cleanValue(raw.receiptNumber);
     const normalizedTaxType = normalizeTaxTypeForSource(raw.taxType ?? '', sourceFile);
-    const taxDetails = normalizeTaxDetails(normalizedTaxType, receiptText);
+    const taxDetails = format?.taxType !== undefined
+        ? { taxType: format.taxType, remarks: format.remarks || format.taxType }
+        : normalizeTaxDetails(normalizedTaxType, receiptText);
     const taxType = taxDetails.taxType;
     const identifierType = raw.identifierType ?? detectIdentifierType(receiptText, receiptNumber);
-    const state = normalizeState(raw.state ?? '', sourceFile) || inferStateFromTaxContext(taxType, receiptNumber);
+    const state = format?.state || normalizeState(raw.state ?? '', sourceFile) || inferStateFromTaxContext(taxType, receiptNumber);
     const assessment = assessReceiptReview({
         paymentDate,
         paymentPeriod,
@@ -733,7 +745,10 @@ const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receip
         receiptNumber,
         identifierType,
         taxType,
-        amount
+        amount,
+        taxConflict: raw.taxConflict,
+        dateFromIssue: raw.dateFromIssue,
+        qrConflict: raw.qrConflict
     });
 
     return {
@@ -750,38 +765,49 @@ const normalizeResult = (raw: Partial<ScannerResult>, sourceFile: string, receip
         remarks: cleanValue(raw.remarks) || taxDetails.remarks,
         state,
         sourceFile,
+        taxConflict: raw.taxConflict,
+        dateFromIssue: raw.dateFromIssue,
+        qrConflict: raw.qrConflict,
         ...assessment,
         reviewed: Boolean(raw.reviewed)
     };
 };
 
-const parseReceiptText = (text: string, sourceFile: string) => {
+export const parseReceiptText = (text: string, sourceFile: string) => {
     const { candidates, duplicateCount } = extractReceiptCandidatesWithSummary(normalizeWhitespace(text));
+    const paymentCandidates = candidates.filter(candidate => !isSupportingDocument(candidate.text));
 
-    const rows = candidates
+    const rows = paymentCandidates
         .map(candidate => {
-            const state = extractState(candidate.text);
+            const format = extractReceiptFormat(candidate.text);
+            const state = format?.state || extractState(candidate.text);
+            const paymentReference = getPaydirectPaymentReference(candidate.text);
+            const receiptNumber = format?.receiptNumber ?? (extractReceiptNumber(candidate.text, state) ||
+                paymentReference || extractFallbackReceiptNumber(candidate.text));
 
             const result = normalizeResult(
                 {
+                    ...format,
                     identityKey: candidate.identityKey,
-                    companyName: extractCompanyName(candidate.text),
-                    paymentDate: extractPaymentDate(candidate.text),
-                    paymentPeriod: extractPaymentPeriod(candidate.text),
-                    receiptNumber: extractReceiptNumber(candidate.text, state) || extractFallbackReceiptNumber(candidate.text),
-                    taxType: extractTaxType(candidate.text),
-                    amount: extractAmount(candidate.text) || extractFallbackAmount(candidate.text),
+                    companyName: format?.companyName || extractCompanyName(candidate.text),
+                    paymentDate: format?.paymentDate ?? extractPaymentDate(candidate.text),
+                    paymentPeriod: format?.paymentPeriod || extractPaymentPeriod(candidate.text),
+                    receiptNumber,
+                    identifierType: format?.identifierType ?? (paymentReference && paymentReference === receiptNumber ? 'Payment Reference' : undefined),
+                    taxType: format?.taxType ?? extractTaxType(candidate.text),
+                    amount: format ? (format.amount ?? 0) : (extractAmount(candidate.text) || extractFallbackAmount(candidate.text)),
                     state
                 },
                 sourceFile,
-                candidate.text
+                candidate.text,
+                format
             );
 
             return result;
         })
         .filter(hasRecoverableReceiptData);
 
-    return { rows, duplicateCount };
+    return { rows, duplicateCount, supportingCount: candidates.length - paymentCandidates.length };
 };
 
 interface OcrSession {
@@ -830,6 +856,8 @@ const recognizeText = async (
 const scoreReceiptOcrText = (text: string) => {
     const signals: Array<[RegExp, number]> = [
         [/\bPAYMENT\s+RECEIPT\b/i, 25],
+        [/\b(?:REVENUE|TREASURY|REVENUE COLLECTOR['’]S)\s+RECEIPT\b/i, 25],
+        [/\b(?:DATE PAID|DATE OF ISSUE|BILLING REF(?:ERENCE)?)\b/i, 25],
         [/Payment\s+Reference\s+Number|\bPRN\b/i, 30],
         [/\bReceipt\s*(?:No\.?|Number|#|ID)\b/i, 25],
         [/\bTotal\s+Amount\s+Paid\b|\bPayment\s+Amount\b/i, 20],
@@ -841,13 +869,13 @@ const scoreReceiptOcrText = (text: string) => {
         Math.min(text.replace(/\s/g, '').length / 100, 10);
 };
 
-const rotateCanvas = (source: HTMLCanvasElement, degrees: 90 | -90) => {
+const rotateCanvas = (source: HTMLCanvasElement, degrees: 90 | -90 | 180) => {
     const target = document.createElement('canvas');
     const context = target.getContext('2d');
     if (!context) throw new Error('Could not initialize rotated PDF page renderer.');
 
-    target.width = source.height;
-    target.height = source.width;
+    target.width = degrees === 180 ? source.width : source.height;
+    target.height = degrees === 180 ? source.height : source.width;
     context.translate(target.width / 2, target.height / 2);
     context.rotate((degrees * Math.PI) / 180);
     context.drawImage(source, -source.width / 2, -source.height / 2);
@@ -861,6 +889,7 @@ const recognizePdfPage = async (
 ) => {
     const attempts: Array<{ label: string; getCanvas: () => HTMLCanvasElement }> = [
         { label, getCanvas: () => canvas },
+        { label: `${label} (upside down)`, getCanvas: () => rotateCanvas(canvas, 180) },
         { label: `${label} (rotated right)`, getCanvas: () => rotateCanvas(canvas, 90) },
         { label: `${label} (rotated left)`, getCanvas: () => rotateCanvas(canvas, -90) }
     ];
@@ -880,8 +909,10 @@ const recognizePdfPage = async (
     return bestText;
 };
 
-const renderPageToCanvas = async (page: any) => {
-    const viewport = page.getViewport({ scale: 2 });
+const renderPageToCanvas = async (page: any, scaleLimit = 2, maxDimension = 3200) => {
+    const natural = page.getViewport({ scale: 1 });
+    const scale = Math.min(scaleLimit, maxDimension / Math.max(natural.width, natural.height));
+    const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     if (!context) throw new Error('Could not initialize PDF page renderer.');
@@ -890,6 +921,24 @@ const renderPageToCanvas = async (page: any) => {
     canvas.height = viewport.height;
     await page.render({ canvasContext: context, viewport }).promise;
     return canvas;
+};
+
+const deltaReceiptQrText = async (canvas: HTMLCanvasElement) => {
+    const context = canvas.getContext('2d');
+    if (!context) return '';
+    try {
+        const [{ prepareZXingModule, readBarcodes }, { default: wasmUrl }] = await Promise.all([
+            import('zxing-wasm/reader'),
+            import('zxing-wasm/reader/zxing_reader.wasm?url')
+        ]);
+        prepareZXingModule({ overrides: { locateFile: () => wasmUrl } });
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+        const codes = await readBarcodes(pixels, { formats: ['QRCode'], tryHarder: true, maxNumberOfSymbols: 4 });
+        const receipts = new Set(codes.map(code => decodeDeltaReceiptPayload(code.text)).filter(Boolean));
+        return receipts.size === 1 ? [...receipts][0] : '';
+    } catch {
+        return ''; // Printed or OCR fields can still be reviewed if barcode recovery is unavailable.
+    }
 };
 
 const extractPdfText = async (file: File, onProgress: (message: string) => void) => {
@@ -907,17 +956,33 @@ const extractPdfText = async (file: File, onProgress: (message: string) => void)
             onProgress(`${file.name}: reading page ${pageNumber} of ${pdf.numPages}`);
             const page = await pdf.getPage(pageNumber);
             const textContent = await page.getTextContent();
-            const pageText = assemblePdfText(textContent.items as Array<{ str?: unknown; hasEOL?: boolean }>);
-
-            if (pageText.length > 40) {
+            let pageText = assemblePdfText(textContent.items as Array<{ str?: unknown; hasEOL?: boolean }>);
+            const format = extractReceiptFormat(pageText);
+            const deltaHint = /\bdelta\b|deltabir|treasury\s+book/i.test(file.name + '\n' + pageText);
+            const recoverDelta = deltaHint && (!format?.receiptNumber || !format.paymentDate || !format.amount);
+            const hasReceiptDetails = pageText.length > 40 && (scoreReceiptOcrText(pageText) >= 42 ||
+                Boolean(format?.receiptNumber && format.amount && format.paymentDate));
+            if ((hasReceiptDetails && !recoverDelta) || isSupportingDocument(pageText)) {
                 pageTexts.push(pageText);
                 continue;
             }
 
             const canvas = await renderPageToCanvas(page);
-            ocrSession ??= await createOcrSession(onProgress);
-            const ocrText = await recognizePdfPage(canvas, ocrSession, `${file.name} page ${pageNumber}`);
-            pageTexts.push(ocrText);
+            if (!hasReceiptDetails) {
+                ocrSession ??= await createOcrSession(onProgress);
+                const ocrText = await recognizePdfPage(canvas, ocrSession, `${file.name} page ${pageNumber}`);
+                if (scoreReceiptOcrText(ocrText) > scoreReceiptOcrText(pageText) || pageText.length <= 40) pageText = ocrText;
+            }
+            if (!isSupportingDocument(pageText) && (!hasReceiptDetails || recoverDelta)) {
+                const qrCanvas = Math.max(canvas.width, canvas.height) < 3200
+                    ? await renderPageToCanvas(page, 5, 3450)
+                    : canvas;
+                const qr = await deltaReceiptQrText(qrCanvas);
+                if (qr && extractReceiptCandidatesWithSummary(pageText).candidates.length <= 1) {
+                    pageText = `${pageText}\n${qr}`;
+                }
+            }
+            pageTexts.push(pageText);
         }
     } finally {
         await ocrSession?.terminate();
@@ -1024,7 +1089,11 @@ const App: React.FC = () => {
                         text:
                             addedCount > 0
                                 ? `Processed ${file.name}: ${addedCount} receipt(s) extracted.${reviewCount ? ` ${reviewCount} receipt(s) need review.` : ''}`
-                                : `Processed ${file.name}: no new unique receipts found.`,
+                                : parsedRows.length > 0
+                                    ? `Processed ${file.name}: no new unique receipts found.`
+                                    : parsed.supportingCount > 0
+                                        ? `Processed ${file.name}: supporting document only. No paid receipt extracted.`
+                                        : `Processed ${file.name}: no paid receipt could be identified.`,
                         type: addedCount > 0 && reviewCount === 0 ? 'success' : 'warning'
                     }
                 ]);
@@ -1057,7 +1126,11 @@ const App: React.FC = () => {
                 reviewed: false
             };
 
-            if (field === 'paymentDate') updated.paymentDateDisplay = formatDateDisplay(value);
+            if (field === 'paymentDate') {
+                updated.paymentDateDisplay = formatDateDisplay(value);
+                updated.dateFromIssue = false;
+            }
+            if (field === 'taxType') updated.taxConflict = false;
             if (field === 'paymentPeriod') updated.paymentPeriodSource = value ? 'receipt' : 'missing';
             if (field === 'receiptNumber' && row.identifierType === 'Missing' && value) updated.identifierType = 'Other';
 
@@ -1069,7 +1142,7 @@ const App: React.FC = () => {
     const confirmScannerResult = (index: number) => {
         setScannerResults(previous => previous.map((row, rowIndex) => {
             if (rowIndex !== index) return row;
-            const hasMissingRequiredField = row.reviewIssues.some(issue => /missing|invalid/i.test(issue));
+            const hasMissingRequiredField = hasMissingRequiredReceiptFields(row);
             return hasMissingRequiredField ? row : { ...row, reviewed: true };
         }));
     };
@@ -1507,7 +1580,7 @@ const App: React.FC = () => {
                                     <tbody className="divide-y divide-white/10">
                                         {scannerResults.map((result, index) => {
                                             const needsReview = result.reviewIssues.length > 0 && !result.reviewed;
-                                            const hasMissingRequiredField = result.reviewIssues.some(issue => /missing|invalid/i.test(issue));
+                                            const hasMissingRequiredField = hasMissingRequiredReceiptFields(result);
                                             const inputClass = 'w-36 rounded-md border border-white/10 bg-slate-950/60 px-2 py-2 text-sm text-slate-200 focus:border-violet-400 focus:outline-none';
 
                                             return (

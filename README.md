@@ -21,9 +21,11 @@ The extraction flow is optimized for uploaded receipts and captures the fields r
 - amount paid; and
 - remarks, including details such as `WHT on Rent`.
 
-Detailed WHT descriptions are normalized to `WHT` for grouping while the description is retained in remarks. Periods inferred from a filename or payment date, alternative identifiers, generic tax types, and missing required fields are highlighted in the editable review table. Schedule downloads remain disabled until every review item is corrected or confirmed.
+Detailed WHT descriptions are normalized to `WHT` for grouping while the description is retained in remarks. The review table flags dates taken from a treasury receipt's issue field, periods inferred from the payment date, missing fields, and conflicting evidence. A clear filename period can be used when the document does not give one. Schedule downloads remain disabled until every review item is corrected or confirmed.
 
-The reconciliation summary shows uploaded files, unique receipts, review status, duplicate print copies excluded, and the extracted total before export.
+The reconciliation summary shows uploaded files, unique receipts, review status, duplicate uploads excluded, and the extracted total before export. Repeated print copies within a PDF are consolidated. Recognized standalone supporting documents, such as unpaid invoices and bank deposit slips, do not create schedule rows.
+
+The scanner recognizes official receipt numbers and labelled alternatives on newer state formats, including Yobe revenue receipts, Plateau billing references and state treasury receipts. Delta QR payloads with receipt details can be read locally in the browser. The app does not open QR links or send receipt data to a verification site.
 
 ## Security Notes
 

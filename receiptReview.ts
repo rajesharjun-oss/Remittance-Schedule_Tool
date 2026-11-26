@@ -6,6 +6,7 @@ export type IdentifierType =
     | 'Transaction Reference'
     | 'Deposit Slip Number'
     | 'CBS Reference'
+    | 'Billing Reference'
     | 'Session ID'
     | 'Other'
     | 'Missing';
@@ -21,6 +22,9 @@ export interface ReviewableReceipt {
     identifierType: IdentifierType;
     taxType: string;
     amount: number;
+    taxConflict?: boolean;
+    dateFromIssue?: boolean;
+    qrConflict?: boolean;
 }
 
 export interface ReceiptReviewAssessment {
@@ -88,6 +92,7 @@ const detailLabels: Array<[RegExp, string]> = [
     [/\bcontracts?\b/i, 'Contract'],
     [/\bcommissions?\b/i, 'Commission'],
     [/\bdividends?\b/i, 'Dividend'],
+    [/\b(?:treasury\s+bills?|t[ -]*bills?|TB['’]?s)\b/i, 'Treasury Bills'],
     [/\binterest\b/i, 'Interest']
 ];
 
@@ -158,13 +163,17 @@ export const assessReceiptReview = (receipt: ReviewableReceipt): ReceiptReviewAs
 
     if (!receipt.paymentDate) reviewIssues.push('Payment date is missing');
     if (!receipt.paymentPeriod) reviewIssues.push('Payment period is missing');
-    if (!receipt.taxType) reviewIssues.push('Tax type is missing');
+    if (!receipt.taxType) reviewIssues.push(receipt.taxConflict
+        ? 'Tax type is unresolved: the revenue item and narration disagree'
+        : 'Tax type is missing');
     if (!receipt.receiptNumber) reviewIssues.push('Receipt or alternative identifier is missing');
     if (!(receipt.amount > 0)) reviewIssues.push('Amount is missing or invalid');
 
     if (receipt.paymentPeriod && receipt.paymentPeriodSource === 'payment-date') {
         reviewIssues.push('Payment period was inferred from the payment date');
     }
+    if (receipt.dateFromIssue) reviewIssues.push('The treasury receipt gives an issue date only. Confirm the payment date.');
+    if (receipt.qrConflict) reviewIssues.push('The QR and printed fields disagree. Check the receipt number, amount and date.');
     const identifiersNeedingReview: IdentifierType[] = ['Deposit Slip Number', 'Other'];
     if (receipt.receiptNumber && identifiersNeedingReview.includes(receipt.identifierType)) {
         reviewIssues.push(`Using ${receipt.identifierType.toLowerCase()} because a receipt number was not identified`);
@@ -179,6 +188,9 @@ export const assessReceiptReview = (receipt: ReviewableReceipt): ReceiptReviewAs
 
     return { confidence, confidenceScore, reviewIssues };
 };
+
+export const hasMissingRequiredReceiptFields = (receipt: ReviewableReceipt) =>
+    !receipt.paymentDate || !receipt.paymentPeriod || !receipt.taxType || !receipt.receiptNumber || !(receipt.amount > 0);
 
 export const createReceiptDeduplicationKey = (receipt: {
     identityKey: string;
